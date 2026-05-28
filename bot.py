@@ -12,23 +12,22 @@ from config import (
     SIGNAL_THRESHOLD, MIN_BOOK_DEPTH_USD, POLL_INTERVAL_SEC,
     POSITION_CHECK_SEC, HARD_CLOSE_ET, SIGNAL_WINDOW_START_ET,
     SIGNAL_WINDOW_END_ET, NOTIONAL_USD, PROFIT_TARGET_PCT, STOP_LOSS_PCT,
-    MAX_POSITIONS
+    MAX_POSITIONS,
 )
 import store
 import signal as sig_module
 import trader
 
 ET = zoneinfo.ZoneInfo("America/New_York")
-LIVE = os.environ.get("LIVE", "0") == "1"  # set LIVE=1 to actually place paper orders
+LIVE = os.environ.get("LIVE", "0") == "1"
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
-    datefmt="%H:%M:%S"
+    datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
 
-_fired_today: set[str] = set()   # tickers we already traded today
 _last_signal_scan = 0
 _last_position_check = 0
 
@@ -61,9 +60,13 @@ def is_market_hours() -> bool:
 def _process_signals():
     if not in_signal_window():
         return
+
     open_pos = store.open_positions()
     if len(open_pos) >= MAX_POSITIONS:
         return
+
+    # Load from DB so restart mid-day doesn't double-trade the same ticker
+    fired_today = store.tickers_traded_today()
 
     log.info("Scanning Polymarket signals...")
     signals = sig_module.scan_all()
@@ -71,23 +74,22 @@ def _process_signals():
 
     for s in signals:
         ticker = s["ticker"]
-        if ticker in _fired_today:
+        if ticker in fired_today:
             continue
         if s.get("error"):
-            log.debug(f"  {ticker}: {s['error']}")
+            log.debug("  %s: %s", ticker, s["error"])
             continue
 
-        prob = s["implied_prob"]
-        depth = s.get("dominant_depth", 0)
+        prob      = s["implied_prob"]
+        depth     = s.get("dominant_depth", 0)
         direction = s["direction"]
 
-        log.info(f"  {ticker}: {direction} @ {prob:.0%} depth=${depth:.0f}")
+        log.info("  %s: %s @ %.0f%% depth=$%.0f", ticker, direction, prob * 100, depth)
 
         fired = 0
         skip_reason = None
 
         if prob >= SIGNAL_THRESHOLD and depth >= MIN_BOOK_DEPTH_USD:
-            # Signal qualifies — enter position
             price = trader.get_price(ticker)
             if not price:
                 skip_reason = "no_price"
@@ -97,15 +99,27 @@ def _process_signals():
                 shares = trader.shares_for_notional(price, NOTIONAL_USD)
                 side = "buy" if direction == "up" else "sell_short"
 
+                order_id = ""
+                status = "shadow"
+
                 if LIVE:
                     result = trader.place_order(ticker, side, shares)
-                    order_id = result.get("order_id", "")
-                    status = result.get("status", "")
-                    log.info(f"  → PAPER ORDER {ticker} {side} {shares}sh @ ${price:.2f} | {status} #{order_id}")
+                    if not result["success"]:
+                        skip_reason = f"order_failed:{result['status']}"
+                        log.warning("  → ORDER FAILED %s %s: %s", ticker, side, result["status"])
+                        store.log_signal(ts, ticker, direction, prob,
+                                         s["total_depth"], s["up_depth"],
+                                         s["down_depth"], s["market_slug"],
+                                         fired=0, skip_reason=skip_reason)
+                        continue
+                    order_id = result["order_id"]
+                    status = result["status"]
+                    log.info("  → PAPER ORDER %s %s %dsh @ $%.2f | %s #%s",
+                             ticker, side, shares, price, status, order_id)
                 else:
                     order_id = f"SHADOW-{ticker}-{ts[:10]}"
-                    status = "shadow"
-                    log.info(f"  → SHADOW (LIVE=0) {ticker} {side} {shares}sh @ ${price:.2f}")
+                    log.info("  → SHADOW (LIVE=0) %s %s %dsh @ $%.2f",
+                             ticker, side, shares, price)
 
                 sig_id = store.log_signal(ts, ticker, direction, prob,
                                           s["total_depth"], s["up_depth"],
@@ -113,7 +127,7 @@ def _process_signals():
                                           fired=1)
                 store.open_position(sig_id, ticker, side, ts, price,
                                     shares, shares * price, order_id, prob)
-                _fired_today.add(ticker)
+                fired_today.add(ticker)
                 fired = 1
         else:
             if prob < SIGNAL_THRESHOLD:
@@ -139,17 +153,18 @@ def _manage_positions():
     for pos in positions:
         pos_id    = pos["id"]
         ticker    = pos["ticker"]
-        direction = pos["direction"]   # 'buy' or 'sell_short'
+        direction = pos["direction"]
         entry     = pos["entry_price"]
         shares    = pos["shares"]
 
         current = trader.get_price(ticker)
         if not current:
+            log.warning("  SKIP %s — could not fetch price", ticker)
             continue
 
         pct_move = (current - entry) / entry
         if direction == "sell_short":
-            pct_move = -pct_move    # profit when price falls
+            pct_move = -pct_move
 
         pnl = round(pct_move * entry * shares, 2)
 
@@ -163,14 +178,21 @@ def _manage_positions():
 
         if exit_reason:
             close_side = "sell" if direction == "buy" else "buy_to_cover"
+            order_ok = True
             if LIVE:
-                trader.place_order(ticker, close_side, int(shares))
-            log.info(f"  CLOSE {ticker} {exit_reason}: entry=${entry:.2f} "
-                     f"now=${current:.2f} move={pct_move:+.2%} pnl=${pnl:+.2f}")
-            store.close_position(pos_id, now_ts, current, exit_reason, pnl)
+                result = trader.place_order(ticker, close_side, int(shares))
+                order_ok = result["success"]
+                if not order_ok:
+                    log.error("  CLOSE ORDER FAILED %s %s: %s — position left open",
+                              ticker, close_side, result["status"])
+
+            if order_ok:
+                log.info("  CLOSE %s %s: entry=$%.2f now=$%.2f move=%+.2f%% pnl=$%+.2f",
+                         ticker, exit_reason, entry, current, pct_move * 100, pnl)
+                store.close_position(pos_id, now_ts, current, exit_reason, pnl)
         else:
-            log.info(f"  HOLD {ticker}: entry=${entry:.2f} now=${current:.2f} "
-                     f"move={pct_move:+.2%} pnl=${pnl:+.2f}")
+            log.info("  HOLD %s: entry=$%.2f now=$%.2f move=%+.2f%% pnl=$%+.2f",
+                     ticker, entry, current, pct_move * 100, pnl)
 
 
 def main():
@@ -178,8 +200,9 @@ def main():
     global _last_signal_scan, _last_position_check
 
     mode = "LIVE (paper orders)" if LIVE else "SHADOW (no orders)"
-    log.info(f"Poly-Stock Arb Bot started — {mode}")
-    log.info(f"Signal threshold: {SIGNAL_THRESHOLD:.0%} | Window: {SIGNAL_WINDOW_START_ET}–{SIGNAL_WINDOW_END_ET} ET")
+    log.info("Poly-Stock Arb Bot started — %s", mode)
+    log.info("Signal threshold: %.0f%% | Window: %s–%s ET",
+             SIGNAL_THRESHOLD * 100, SIGNAL_WINDOW_START_ET, SIGNAL_WINDOW_END_ET)
 
     while True:
         now = time.time()
@@ -189,23 +212,21 @@ def main():
             time.sleep(300)
             continue
 
-        # Signal scan every POLL_INTERVAL_SEC
         if now - _last_signal_scan >= POLL_INTERVAL_SEC:
             try:
                 _process_signals()
             except Exception as e:
-                log.error(f"Signal scan error: {e}", exc_info=True)
+                log.error("Signal scan error: %s", e, exc_info=True)
             _last_signal_scan = now
 
-        # Position management every POSITION_CHECK_SEC
         if now - _last_position_check >= POSITION_CHECK_SEC:
             try:
                 _manage_positions()
             except Exception as e:
-                log.error(f"Position check error: {e}", exc_info=True)
+                log.error("Position check error: %s", e, exc_info=True)
             _last_position_check = now
 
-        time.sleep(30)
+        time.sleep(10)
 
 
 if __name__ == "__main__":
