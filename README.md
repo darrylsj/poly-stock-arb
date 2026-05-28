@@ -4,34 +4,6 @@ Uses Polymarket prediction-market book imbalance as an alpha signal to enter
 intraday long/short positions on Nasdaq stocks via Tradier's **paper** sandbox.
 Zero real money is at risk — this is a calibration and research tool.
 
-## Live calibration data
-
-The signal hypothesis is backed by live Polymarket trading data from a parallel
-stock-direction bot (E22, live from 2026-05-28) that bets directly on the same
-Polymarket "up or down today?" markets this bot reads as a signal.
-
-### Polymarket stock-direction accuracy (shadow + live, n=37, 2026-05-15 → 2026-05-27)
-
-| Date | Picks | Wins | Daily PnL |
-|------|-------|------|-----------|
-| 2026-05-15 | 1 | 1 | +$8.50 |
-| 2026-05-18 | 8 | 2 | -$43.75 |
-| 2026-05-19 | 3 | 3 | +$35.20 |
-| 2026-05-20 | 6 | 6 | +$78.16 |
-| 2026-05-21 | 2 | 0 | $0.00 |
-| 2026-05-22 | 9 | 5 | +$24.67 |
-| 2026-05-26 | 3 | 1 | -$3.00 |
-| 2026-05-27 | 5 | 4 | +$39.50 |
-| **Total** | **37** | **22** | **+$139.28** |
-
-**59.5% WR, +$139 net over 37 resolved bets** — Polymarket crowd is directionally
-correct ~60% of the time on individual stock direction. That edge is what this bot
-attempts to exploit on the Tradier side.
-
-> Note: May 21 PnL = $0 due to shadow-only resolution (no orders filled).
-> May 18 loss spike was pre-confidence-gate; guardrails now exclude the low-confidence
-> DOWN-MID cohort that drove that session's losses.
-
 ## Hypothesis
 
 Polymarket runs active "Up or Down today?" markets for major US stocks (AAPL,
