@@ -1,17 +1,19 @@
-"""Polymarket book imbalance signal reader.
+'''Polymarket book imbalance signal reader.
 
 For each ticker, finds the "up or down today" Polymarket market,
 reads the CLOB order book, and returns implied probability.
-"""
+'''
 import requests
 import datetime
+import json
 from config import POLYMARKET_CLOB, POLYMARKET_GAMMA, TICKERS
+
 
 # Slug patterns Polymarket uses for stock direction markets
 def _today_slug(ticker: str) -> list[str]:
     today = datetime.date.today()
-    dt = today.strftime("%B-%-d-%Y").lower()        # e.g. may-28-2026
-    dt2 = today.strftime("%b-%-d-%Y").lower()       # e.g. may-28-2026 (same)
+    day = today.day
+    dt = f"{today.strftime('%B')}-{day}-{today.year}".lower()
     base = ticker.lower()
     return [
         f"{base}-up-or-down-on-{dt}",
@@ -110,7 +112,6 @@ def get_signal(ticker: str) -> dict:
     # Get token IDs for Up and Down outcomes
     tokens = market.get("clobTokenIds") or market.get("tokens") or []
     if isinstance(tokens, str):
-        import json
         try:
             tokens = json.loads(tokens)
         except Exception:
@@ -118,7 +119,6 @@ def get_signal(ticker: str) -> dict:
 
     outcomes = market.get("outcomes", ["Up", "Down"])
     if isinstance(outcomes, str):
-        import json
         try:
             outcomes = json.loads(outcomes)
         except Exception:

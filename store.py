@@ -1,12 +1,13 @@
-"""SQLite store — signals, positions, trades, calibration."""
+'''SQLite store — signals, positions, trades, calibration.'''
 import sqlite3
 import contextlib
+import datetime
 from config import DB_PATH
 
 
 def init_db():
     with conn() as c:
-        c.executescript("""
+        c.executescript('''
         CREATE TABLE IF NOT EXISTS signals (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             ts          TEXT NOT NULL,
@@ -51,7 +52,7 @@ def init_db():
             stock_pnl        REAL,           -- what we made/lost on the stock trade
             notes            TEXT
         );
-        """)
+        ''')
 
 
 @contextlib.contextmanager
@@ -124,3 +125,14 @@ def daily_summary(date):
                    ROUND(SUM(COALESCE(realized_pnl,0)),2) as net_pnl
             FROM positions WHERE DATE(entry_ts)=? AND status='closed'
         """, (date,)).fetchone()
+
+
+def fired_today() -> set[str]:
+    """Return set of tickers we already fired on today (from DB)."""
+    today = datetime.date.today().isoformat()
+    with conn() as c:
+        rows = c.execute(
+            "SELECT DISTINCT ticker FROM signals WHERE fired = 1 AND DATE(ts) = ?",
+            (today,)
+        ).fetchall()
+        return {r["ticker"] for r in rows}

@@ -1,8 +1,8 @@
-"""Main bot loop — Polymarket signal → Tradier paper execution.
+'''Main bot loop — Polymarket signal → Tradier paper execution.
 
 Run: python3 bot.py
 Shadow-only until LIVE=1 env var is set.
-"""
+'''
 import os
 import time
 import datetime
@@ -176,6 +176,9 @@ def _manage_positions():
 def main():
     store.init_db()
     global _last_signal_scan, _last_position_check
+
+    # Restore fired tickers from DB so we don't re-fire same ticker after restart
+    _fired_today.update(store.fired_today())
 
     mode = "LIVE (paper orders)" if LIVE else "SHADOW (no orders)"
     log.info(f"Poly-Stock Arb Bot started — {mode}")
