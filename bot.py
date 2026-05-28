@@ -1,8 +1,8 @@
-"""Main bot loop — Polymarket signal → Tradier paper execution.
+'''Main bot loop — Polymarket signal → Tradier paper execution.
 
 Run: python3 bot.py
 Shadow-only until LIVE=1 env var is set.
-"""
+'''
 import os
 import time
 import datetime
@@ -19,8 +19,9 @@ import signal as sig_module
 import trader
 
 ET = zoneinfo.ZoneInfo("America/New_York")
-LIVE = os.environ.get("LIVE", "0") == "1"  # set LIVE=1 to actually place paper orders
+LIVE = os.environ.get("LIVE", "0") == "1"
 
+# Structured logging
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
@@ -28,7 +29,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-_fired_today: set[str] = set()   # tickers we already traded today
+_fired_today: set[str] = set()
 _last_signal_scan = 0
 _last_position_check = 0
 
@@ -63,6 +64,7 @@ def _process_signals():
         return
     open_pos = store.open_positions()
     if len(open_pos) >= MAX_POSITIONS:
+        log.debug("Max positions reached, skipping signal scan")
         return
 
     log.info("Scanning Polymarket signals...")
@@ -72,6 +74,7 @@ def _process_signals():
     for s in signals:
         ticker = s["ticker"]
         if ticker in _fired_today:
+            log.debug(f"  {ticker}: already fired today")
             continue
         if s.get("error"):
             log.debug(f"  {ticker}: {s['error']}")
@@ -81,13 +84,12 @@ def _process_signals():
         depth = s.get("dominant_depth", 0)
         direction = s["direction"]
 
-        log.info(f"  {ticker}: {direction} @ {prob:.0%} depth=${depth:.0f}")
+        log.info(f"Signal: {ticker} {direction.upper()} prob={prob:.1%} depth=${depth:.0f}")
 
         fired = 0
         skip_reason = None
 
         if prob >= SIGNAL_THRESHOLD and depth >= MIN_BOOK_DEPTH_USD:
-            # Signal qualifies — enter position
             price = trader.get_price(ticker)
             if not price:
                 skip_reason = "no_price"
@@ -101,11 +103,11 @@ def _process_signals():
                     result = trader.place_order(ticker, side, shares)
                     order_id = result.get("order_id", "")
                     status = result.get("status", "")
-                    log.info(f"  → PAPER ORDER {ticker} {side} {shares}sh @ ${price:.2f} | {status} #{order_id}")
+                    log.info(f"ORDER PLACED: {ticker} {side} {shares}sh @ ${price:.2f} | {status} #{order_id}")
                 else:
                     order_id = f"SHADOW-{ticker}-{ts[:10]}"
                     status = "shadow"
-                    log.info(f"  → SHADOW (LIVE=0) {ticker} {side} {shares}sh @ ${price:.2f}")
+                    log.info(f"SHADOW ORDER: {ticker} {side} {shares}sh @ ${price:.2f}")
 
                 sig_id = store.log_signal(ts, ticker, direction, prob,
                                           s["total_depth"], s["up_depth"],
@@ -122,6 +124,7 @@ def _process_signals():
                 skip_reason = f"depth_{depth:.0f}_below_{MIN_BOOK_DEPTH_USD}"
 
         if not fired:
+            log.info(f"SKIP {ticker}: {skip_reason}")
             store.log_signal(ts, ticker, direction, prob,
                              s["total_depth"], s["up_depth"],
                              s["down_depth"], s["market_slug"],
@@ -139,7 +142,7 @@ def _manage_positions():
     for pos in positions:
         pos_id    = pos["id"]
         ticker    = pos["ticker"]
-        direction = pos["direction"]   # 'buy' or 'sell_short'
+        direction = pos["direction"]
         entry     = pos["entry_price"]
         shares    = pos["shares"]
 
@@ -149,7 +152,7 @@ def _manage_positions():
 
         pct_move = (current - entry) / entry
         if direction == "sell_short":
-            pct_move = -pct_move    # profit when price falls
+            pct_move = -pct_move
 
         pnl = round(pct_move * entry * shares, 2)
 
@@ -165,21 +168,24 @@ def _manage_positions():
             close_side = "sell" if direction == "buy" else "buy_to_cover"
             if LIVE:
                 trader.place_order(ticker, close_side, int(shares))
-            log.info(f"  CLOSE {ticker} {exit_reason}: entry=${entry:.2f} "
-                     f"now=${current:.2f} move={pct_move:+.2%} pnl=${pnl:+.2f}")
+            log.info(f"POSITION CLOSED: {ticker} reason={exit_reason} entry=${entry:.2f} now=${current:.2f} move={pct_move:+.2%} pnl=${pnl:+.2f}")
             store.close_position(pos_id, now_ts, current, exit_reason, pnl)
         else:
-            log.info(f"  HOLD {ticker}: entry=${entry:.2f} now=${current:.2f} "
-                     f"move={pct_move:+.2%} pnl=${pnl:+.2f}")
+            log.debug(f"HOLD {ticker}: move={pct_move:+.2%} pnl=${pnl:+.2f}")
 
 
 def main():
     store.init_db()
     global _last_signal_scan, _last_position_check
 
+    _fired_today.update(store.fired_today())
+
     mode = "LIVE (paper orders)" if LIVE else "SHADOW (no orders)"
+    log.info("=" * 60)
     log.info(f"Poly-Stock Arb Bot started — {mode}")
     log.info(f"Signal threshold: {SIGNAL_THRESHOLD:.0%} | Window: {SIGNAL_WINDOW_START_ET}–{SIGNAL_WINDOW_END_ET} ET")
+    log.info(f"Notional: ${NOTIONAL_USD} | Max positions: {MAX_POSITIONS}")
+    log.info("=" * 60)
 
     while True:
         now = time.time()
@@ -189,7 +195,6 @@ def main():
             time.sleep(300)
             continue
 
-        # Signal scan every POLL_INTERVAL_SEC
         if now - _last_signal_scan >= POLL_INTERVAL_SEC:
             try:
                 _process_signals()
@@ -197,7 +202,6 @@ def main():
                 log.error(f"Signal scan error: {e}", exc_info=True)
             _last_signal_scan = now
 
-        # Position management every POSITION_CHECK_SEC
         if now - _last_position_check >= POSITION_CHECK_SEC:
             try:
                 _manage_positions()
